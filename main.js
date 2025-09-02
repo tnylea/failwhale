@@ -4,6 +4,8 @@ const { app, BrowserWindow, screen, Tray, Menu, ipcMain, nativeImage } = require
 const fs = require('fs');
 const path = require('path');
 
+let status = 'success'; // 'success', 'failure', 'start'
+
 const apiKey = process.env.GIPHY_API_KEY;
 let tray = null;
 let sourcesWindow = null;
@@ -13,7 +15,7 @@ let workflowStates = new Map(); // Track workflow states
 // Data file path
 const dataPath = path.join(__dirname, 'sources.json');
 
-async function getRandomGif(tag = 'fail') {
+async function getRandomGif(tag = 'failure') {
   try {
     const res = await fetch(`https://api.giphy.com/v1/gifs/random?api_key=${apiKey}&tag=${tag}`);
     if (!res.ok) throw new Error(`HTTP error ${res.status}`);
@@ -60,13 +62,15 @@ function createGifWindow(gifData) {
   const display = screen.getPrimaryDisplay();
   const { width: screenWidth, height: screenHeight } = display.workAreaSize;
 
-  const x = screenWidth - width - 20;
-  const yVisible = screenHeight - height - 20;
-  const yHidden = screenHeight + 20; // off-screen (below bottom)
+  console.log(height);
+  const updatedHeight=height+80;
+  const x = screenWidth - width - 10;
+  const yVisible = screenHeight - height - 40;
+  const yHidden = screenHeight + 40; // off-screen (below bottom)
 
   const win = new BrowserWindow({
     width,
-    height,
+    updatedHeight,
     x,
     y: yHidden, // start hidden
     frame: false,
@@ -78,7 +82,11 @@ function createGifWindow(gifData) {
     webPreferences: { contextIsolation: true }
   });
 
-  win.loadURL(`data:text/html;charset=utf-8,<html><body style="margin:0; background:transparent; display:flex; align-items:center; justify-content:center;"><img src="${url}" style="max-width:100%; max-height:100%;" /></body></html>`);
+  let backgroundColor = 'rgb(227, 38, 0)';
+  if (status === 'success') {
+    backgroundColor = 'rgb(0, 180, 0)';
+  }
+  win.loadURL(`data:text/html;charset=utf-8,<html><body style="margin:0; background:transparent; overflow: hidden"><div style="display:block; text-align:center; background:rgba(255, 255, 255, 1); border-radius:10px; overflow:hidden;"><div style="height:60px; font-family: monospace; text-transform: uppercase; display:flex; align-items:center; justify-content:center; font-size:20px; color:rgb(255, 255, 255); background:${backgroundColor};">${status}</div><img src="${url}" style="max-width:100%; max-height:100%; height:auto;" /></div></body></html>`);
 
   // Slide up once ready
   win.once('ready-to-show', () => {
@@ -100,7 +108,7 @@ app.whenReady().then(() => {
   }
 
   try {
-    const iconPath = path.join(__dirname, 'icon-tray-good.png');
+    const iconPath = path.join(__dirname, 'icon-tray.png');
     console.log('Loading tray icon from:', iconPath);
     
     // Create a properly sized icon for macOS tray
@@ -139,6 +147,13 @@ app.whenReady().then(() => {
   }
   const contextMenu = Menu.buildFromTemplate([
     { label: 'Sources', click: () => openSourcesWindow() },
+    { 
+      label: 'Simulations',
+      submenu: [
+        { label: 'Success', click: () => simulateSuccess() },
+        { label: 'Failure', click: () => simulateFailure() }
+      ]
+    },
     { type: 'separator' },
     { label: 'Quit', click: () => app.quit() }
   ]);
@@ -150,8 +165,8 @@ app.whenReady().then(() => {
 
   // Background interval for monitoring workflows
   setInterval(async () => {
-    await checkWorkflows();
-  }, 30000); // Check every 30 seconds
+    //await checkWorkflows();
+  }, 10000); // Check every 30 seconds
 });
 
 // Data persistence functions
@@ -186,22 +201,90 @@ function extractRepoInfo(githubUrl) {
   return null;
 }
 
-async function fetchWorkflowRuns(owner, repo) {
+async function fetchWorkflowRuns(owner, repo, retries = 3) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+      
+      const url = `https://api.github.com/repos/${owner}/${repo}/actions/runs`;
+      const headers = {
+        'User-Agent': 'FailWhale-CI-Notifier/1.0'
+      };
+      
+      // Add GitHub token if available for higher rate limits (60/hour -> 5,000/hour)
+      if (process.env.GITHUB_TOKEN) {
+        headers['Authorization'] = `Bearer ${process.env.GITHUB_TOKEN}`;
+      }
+      
+      const response = await fetch(url, {
+        signal: controller.signal,
+        headers
+      });
+      
+      clearTimeout(timeoutId);
+      
+      if (!response.ok) {
+        if (response.status === 403) {
+          const resetTime = response.headers.get('x-ratelimit-reset');
+          const remaining = response.headers.get('x-ratelimit-remaining');
+          const limit = response.headers.get('x-ratelimit-limit');
+          console.warn(`GitHub API rate limited for ${owner}/${repo}. Remaining: ${remaining}/${limit}, Reset: ${new Date(resetTime * 1000)}`);
+          throw new Error(`GitHub API rate limited: ${response.status}`);
+        }
+        throw new Error(`GitHub API error: ${response.status}`);
+      }
+      
+      const data = await response.json();
+      return data.workflow_runs || [];
+      
+    } catch (err) {
+      const isNetworkError = err.code === 'ENOTFOUND' || err.name === 'AbortError' || err.message.includes('fetch failed');
+      
+      if (attempt === retries) {
+        console.error(`Failed to fetch workflows for ${owner}/${repo} after ${retries} attempts:`, err.message);
+        return [];
+      }
+      
+      if (isNetworkError) {
+        const delay = Math.min(1000 * Math.pow(2, attempt - 1), 30000); // Exponential backoff, max 30s
+        console.warn(`Network error for ${owner}/${repo} (attempt ${attempt}/${retries}). Retrying in ${delay}ms...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      } else {
+        console.error(`Non-network error for ${owner}/${repo}:`, err.message);
+        return [];
+      }
+    }
+  }
+  return [];
+}
+
+// Network connectivity check
+async function isNetworkAvailable() {
   try {
-    const url = `https://api.github.com/repos/${owner}/${repo}/actions/runs`;
-    const response = await fetch(url);
-    if (!response.ok) throw new Error(`GitHub API error: ${response.status}`);
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 5000);
     
-    const data = await response.json();
-    return data.workflow_runs || [];
-  } catch (err) {
-    console.error(`Error fetching workflows for ${owner}/${repo}:`, err);
-    return [];
+    const response = await fetch('https://api.github.com', {
+      method: 'HEAD',
+      signal: controller.signal
+    });
+    
+    clearTimeout(timeoutId);
+    return response.status < 500; // Accept any non-server error
+  } catch {
+    return false;
   }
 }
 
 // Workflow monitoring
 async function checkWorkflows() {
+  // Check network connectivity first
+  if (!(await isNetworkAvailable())) {
+    console.log('Network unavailable, skipping workflow check');
+    return;
+  }
+  
   for (const source of sources) {
     const repoInfo = extractRepoInfo(source.url);
     if (!repoInfo) continue;
@@ -228,6 +311,7 @@ async function checkWorkflows() {
       if (latestRun.status !== 'completed') {
         // New workflow started
         const gifData = await getRandomGif('lets get started');
+        status = 'START';
         if (gifData.url) {
           createGifWindow(gifData);
         }
@@ -244,6 +328,7 @@ async function checkWorkflows() {
     else if (previousState.status !== 'completed' && latestRun.status === 'completed') {
       const tag = latestRun.conclusion === 'success' ? 'success' : 'failure';
       const gifData = await getRandomGif(tag);
+      status = tag;
       if (gifData.url) {
         createGifWindow(gifData);
       }
@@ -279,6 +364,22 @@ function openSourcesWindow() {
   sourcesWindow.on('closed', () => {
     sourcesWindow = null;
   });
+}
+
+async function simulateSuccess() {
+  const gifData = await getRandomGif('success');
+  status = 'success';
+  if (gifData.url) {
+    createGifWindow(gifData);
+  }
+}
+
+async function simulateFailure() {
+  const gifData = await getRandomGif('failure');
+  status = 'failure';
+  if (gifData.url) {
+    createGifWindow(gifData);
+  }
 }
 
 function getSourcesHTML() {
