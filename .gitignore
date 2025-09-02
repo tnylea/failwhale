@@ -1,0 +1,9 @@
+# windsurf rules
+.windsurfrules
+
+# Environment variables (contains sensitive API keys)
+.env
+
+# Node modules
+node_modules/
+
