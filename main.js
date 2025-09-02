@@ -4,6 +4,8 @@ const { app, BrowserWindow, screen, Tray, Menu, ipcMain, nativeImage } = require
 const fs = require('fs');
 const path = require('path');
 
+let status = 'success'; // 'success', 'failure', 'start'
+
 const apiKey = process.env.GIPHY_API_KEY;
 let tray = null;
 let sourcesWindow = null;
@@ -13,7 +15,7 @@ let workflowStates = new Map(); // Track workflow states
 // Data file path
 const dataPath = path.join(__dirname, 'sources.json');
 
-async function getRandomGif(tag = 'fail') {
+async function getRandomGif(tag = 'failure') {
   try {
     const res = await fetch(`https://api.giphy.com/v1/gifs/random?api_key=${apiKey}&tag=${tag}`);
     if (!res.ok) throw new Error(`HTTP error ${res.status}`);
@@ -60,13 +62,15 @@ function createGifWindow(gifData) {
   const display = screen.getPrimaryDisplay();
   const { width: screenWidth, height: screenHeight } = display.workAreaSize;
 
-  const x = screenWidth - width - 20;
-  const yVisible = screenHeight - height - 20;
-  const yHidden = screenHeight + 20; // off-screen (below bottom)
+  console.log(height);
+  const updatedHeight=height+80;
+  const x = screenWidth - width - 10;
+  const yVisible = screenHeight - height - 40;
+  const yHidden = screenHeight + 40; // off-screen (below bottom)
 
   const win = new BrowserWindow({
     width,
-    height,
+    updatedHeight,
     x,
     y: yHidden, // start hidden
     frame: false,
@@ -78,7 +82,11 @@ function createGifWindow(gifData) {
     webPreferences: { contextIsolation: true }
   });
 
-  win.loadURL(`data:text/html;charset=utf-8,<html><body style="margin:0; background:transparent; display:flex; align-items:center; justify-content:center;"><img src="${url}" style="max-width:100%; max-height:100%;" /></body></html>`);
+  let backgroundColor = 'rgb(227, 38, 0)';
+  if (status === 'success') {
+    backgroundColor = 'rgb(0, 180, 0)';
+  }
+  win.loadURL(`data:text/html;charset=utf-8,<html><body style="margin:0; background:transparent; overflow: hidden"><div style="display:block; text-align:center; background:rgba(255, 255, 255, 1); border-radius:10px; overflow:hidden;"><div style="height:60px; font-family: monospace; text-transform: uppercase; display:flex; align-items:center; justify-content:center; font-size:20px; color:rgb(255, 255, 255); background:${backgroundColor};">${status}</div><img src="${url}" style="max-width:100%; max-height:100%; height:auto;" /></div></body></html>`);
 
   // Slide up once ready
   win.once('ready-to-show', () => {
@@ -303,6 +311,7 @@ async function checkWorkflows() {
       if (latestRun.status !== 'completed') {
         // New workflow started
         const gifData = await getRandomGif('lets get started');
+        status = 'START';
         if (gifData.url) {
           createGifWindow(gifData);
         }
@@ -319,6 +328,7 @@ async function checkWorkflows() {
     else if (previousState.status !== 'completed' && latestRun.status === 'completed') {
       const tag = latestRun.conclusion === 'success' ? 'success' : 'failure';
       const gifData = await getRandomGif(tag);
+      status = tag;
       if (gifData.url) {
         createGifWindow(gifData);
       }
@@ -358,6 +368,7 @@ function openSourcesWindow() {
 
 async function simulateSuccess() {
   const gifData = await getRandomGif('success');
+  status = 'success';
   if (gifData.url) {
     createGifWindow(gifData);
   }
@@ -365,6 +376,7 @@ async function simulateSuccess() {
 
 async function simulateFailure() {
   const gifData = await getRandomGif('failure');
+  status = 'failure';
   if (gifData.url) {
     createGifWindow(gifData);
   }
