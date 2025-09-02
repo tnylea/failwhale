@@ -100,7 +100,7 @@ app.whenReady().then(() => {
   }
 
   try {
-    const iconPath = path.join(__dirname, 'icon-tray-good.png');
+    const iconPath = path.join(__dirname, 'icon-tray.png');
     console.log('Loading tray icon from:', iconPath);
     
     // Create a properly sized icon for macOS tray
