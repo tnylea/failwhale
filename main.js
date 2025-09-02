@@ -139,6 +139,13 @@ app.whenReady().then(() => {
   }
   const contextMenu = Menu.buildFromTemplate([
     { label: 'Sources', click: () => openSourcesWindow() },
+    { 
+      label: 'Simulations',
+      submenu: [
+        { label: 'Success', click: () => simulateSuccess() },
+        { label: 'Failure', click: () => simulateFailure() }
+      ]
+    },
     { type: 'separator' },
     { label: 'Quit', click: () => app.quit() }
   ]);
@@ -150,7 +157,7 @@ app.whenReady().then(() => {
 
   // Background interval for monitoring workflows
   setInterval(async () => {
-    await checkWorkflows();
+    //await checkWorkflows();
   }, 10000); // Check every 30 seconds
 });
 
@@ -193,18 +200,28 @@ async function fetchWorkflowRuns(owner, repo, retries = 3) {
       const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
       
       const url = `https://api.github.com/repos/${owner}/${repo}/actions/runs`;
+      const headers = {
+        'User-Agent': 'FailWhale-CI-Notifier/1.0'
+      };
+      
+      // Add GitHub token if available for higher rate limits (60/hour -> 5,000/hour)
+      if (process.env.GITHUB_TOKEN) {
+        headers['Authorization'] = `Bearer ${process.env.GITHUB_TOKEN}`;
+      }
+      
       const response = await fetch(url, {
         signal: controller.signal,
-        headers: {
-          'User-Agent': 'FailWhale-CI-Notifier/1.0'
-        }
+        headers
       });
       
       clearTimeout(timeoutId);
       
       if (!response.ok) {
         if (response.status === 403) {
-          console.warn(`GitHub API rate limited for ${owner}/${repo}. Waiting before retry...`);
+          const resetTime = response.headers.get('x-ratelimit-reset');
+          const remaining = response.headers.get('x-ratelimit-remaining');
+          const limit = response.headers.get('x-ratelimit-limit');
+          console.warn(`GitHub API rate limited for ${owner}/${repo}. Remaining: ${remaining}/${limit}, Reset: ${new Date(resetTime * 1000)}`);
           throw new Error(`GitHub API rate limited: ${response.status}`);
         }
         throw new Error(`GitHub API error: ${response.status}`);
@@ -337,6 +354,20 @@ function openSourcesWindow() {
   sourcesWindow.on('closed', () => {
     sourcesWindow = null;
   });
+}
+
+async function simulateSuccess() {
+  const gifData = await getRandomGif('success');
+  if (gifData.url) {
+    createGifWindow(gifData);
+  }
+}
+
+async function simulateFailure() {
+  const gifData = await getRandomGif('failure');
+  if (gifData.url) {
+    createGifWindow(gifData);
+  }
 }
 
 function getSourcesHTML() {
