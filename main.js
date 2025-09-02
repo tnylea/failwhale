@@ -151,7 +151,7 @@ app.whenReady().then(() => {
   // Background interval for monitoring workflows
   setInterval(async () => {
     await checkWorkflows();
-  }, 30000); // Check every 30 seconds
+  }, 10000); // Check every 30 seconds
 });
 
 // Data persistence functions
@@ -186,22 +186,80 @@ function extractRepoInfo(githubUrl) {
   return null;
 }
 
-async function fetchWorkflowRuns(owner, repo) {
+async function fetchWorkflowRuns(owner, repo, retries = 3) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+      
+      const url = `https://api.github.com/repos/${owner}/${repo}/actions/runs`;
+      const response = await fetch(url, {
+        signal: controller.signal,
+        headers: {
+          'User-Agent': 'FailWhale-CI-Notifier/1.0'
+        }
+      });
+      
+      clearTimeout(timeoutId);
+      
+      if (!response.ok) {
+        if (response.status === 403) {
+          console.warn(`GitHub API rate limited for ${owner}/${repo}. Waiting before retry...`);
+          throw new Error(`GitHub API rate limited: ${response.status}`);
+        }
+        throw new Error(`GitHub API error: ${response.status}`);
+      }
+      
+      const data = await response.json();
+      return data.workflow_runs || [];
+      
+    } catch (err) {
+      const isNetworkError = err.code === 'ENOTFOUND' || err.name === 'AbortError' || err.message.includes('fetch failed');
+      
+      if (attempt === retries) {
+        console.error(`Failed to fetch workflows for ${owner}/${repo} after ${retries} attempts:`, err.message);
+        return [];
+      }
+      
+      if (isNetworkError) {
+        const delay = Math.min(1000 * Math.pow(2, attempt - 1), 30000); // Exponential backoff, max 30s
+        console.warn(`Network error for ${owner}/${repo} (attempt ${attempt}/${retries}). Retrying in ${delay}ms...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      } else {
+        console.error(`Non-network error for ${owner}/${repo}:`, err.message);
+        return [];
+      }
+    }
+  }
+  return [];
+}
+
+// Network connectivity check
+async function isNetworkAvailable() {
   try {
-    const url = `https://api.github.com/repos/${owner}/${repo}/actions/runs`;
-    const response = await fetch(url);
-    if (!response.ok) throw new Error(`GitHub API error: ${response.status}`);
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 5000);
     
-    const data = await response.json();
-    return data.workflow_runs || [];
-  } catch (err) {
-    console.error(`Error fetching workflows for ${owner}/${repo}:`, err);
-    return [];
+    const response = await fetch('https://api.github.com', {
+      method: 'HEAD',
+      signal: controller.signal
+    });
+    
+    clearTimeout(timeoutId);
+    return response.status < 500; // Accept any non-server error
+  } catch {
+    return false;
   }
 }
 
 // Workflow monitoring
 async function checkWorkflows() {
+  // Check network connectivity first
+  if (!(await isNetworkAvailable())) {
+    console.log('Network unavailable, skipping workflow check');
+    return;
+  }
+  
   for (const source of sources) {
     const repoInfo = extractRepoInfo(source.url);
     if (!repoInfo) continue;
